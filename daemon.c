@@ -1,13 +1,9 @@
 #include "cache.h"
+#include "config.h"
 #include "pkt-line.h"
-#include "exec_cmd.h"
 #include "run-command.h"
 #include "strbuf.h"
 #include "string-list.h"
-
-#ifndef HOST_NAME_MAX
-#define HOST_NAME_MAX 256
-#endif
 
 #ifdef NO_INITGROUPS
 #define initgroups(x, y) (0) /* nothing */
@@ -32,7 +28,7 @@ static const char daemon_usage[] =
 "           [<directory>...]";
 
 /* List of acceptable pathname prefixes */
-static char **ok_paths;
+static const char **ok_paths;
 static int strict_paths;
 
 /* If this is set, git-daemon-export-ok is not required */
@@ -161,6 +157,7 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 {
 	static char rpath[PATH_MAX];
 	static char interp_path[PATH_MAX];
+	size_t rlen;
 	const char *path;
 	const char *dir;
 
@@ -188,8 +185,12 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 			namlen = slash - dir;
 			restlen -= namlen;
 			loginfo("userpath <%s>, request <%s>, namlen %d, restlen %d, slash <%s>", user_path, dir, namlen, restlen, slash);
-			snprintf(rpath, PATH_MAX, "%.*s/%s%.*s",
-				 namlen, dir, user_path, restlen, slash);
+			rlen = snprintf(rpath, sizeof(rpath), "%.*s/%s%.*s",
+					namlen, dir, user_path, restlen, slash);
+			if (rlen >= sizeof(rpath)) {
+				logerror("user-path too large: %s", rpath);
+				return NULL;
+			}
 			dir = rpath;
 		}
 	}
@@ -208,7 +209,15 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 
 		strbuf_expand(&expanded_path, interpolated_path,
 			      expand_path, &context);
-		strlcpy(interp_path, expanded_path.buf, PATH_MAX);
+
+		rlen = strlcpy(interp_path, expanded_path.buf,
+			       sizeof(interp_path));
+		if (rlen >= sizeof(interp_path)) {
+			logerror("interpolated path too large: %s",
+				 interp_path);
+			return NULL;
+		}
+
 		strbuf_release(&expanded_path);
 		loginfo("Interpolated dir '%s'", interp_path);
 
@@ -220,7 +229,11 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 			logerror("'%s': Non-absolute path denied (base-path active)", dir);
 			return NULL;
 		}
-		snprintf(rpath, PATH_MAX, "%s%s", base_path, dir);
+		rlen = snprintf(rpath, sizeof(rpath), "%s%s", base_path, dir);
+		if (rlen >= sizeof(rpath)) {
+			logerror("base-path too large: %s", rpath);
+			return NULL;
+		}
 		dir = rpath;
 	}
 
@@ -240,7 +253,7 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 	}
 
 	if ( ok_paths && *ok_paths ) {
-		char **pp;
+		const char **pp;
 		int pathlen = strlen(path);
 
 		/* The validation is done on the paths after enter_repo
@@ -269,7 +282,7 @@ static const char *path_ok(const char *directory, struct hostinfo *hi)
 	return NULL;		/* Fallthrough. Deny by default */
 }
 
-typedef int (*daemon_service_fn)(void);
+typedef int (*daemon_service_fn)(const struct argv_array *env);
 struct daemon_service {
 	const char *name;
 	const char *config_name;
@@ -282,7 +295,7 @@ static int daemon_error(const char *dir, const char *msg)
 {
 	if (!informative_errors)
 		msg = "access denied or repository not exported";
-	packet_write(1, "ERR %s: %s", msg, dir);
+	packet_write_fmt(1, "ERR %s: %s", msg, dir);
 	return -1;
 }
 
@@ -350,7 +363,7 @@ error_return:
 }
 
 static int run_service(const char *dir, struct daemon_service *service,
-		       struct hostinfo *hi)
+		       struct hostinfo *hi, const struct argv_array *env)
 {
 	const char *path;
 	int enabled = service->enabled;
@@ -409,7 +422,7 @@ static int run_service(const char *dir, struct daemon_service *service,
 	 */
 	signal(SIGTERM, SIG_IGN);
 
-	return service->fn();
+	return service->fn(env);
 }
 
 static void copy_to_log(int fd)
@@ -433,46 +446,51 @@ static void copy_to_log(int fd)
 	fclose(fp);
 }
 
-static int run_service_command(const char **argv)
+static int run_service_command(struct child_process *cld)
 {
-	struct child_process cld = CHILD_PROCESS_INIT;
-
-	cld.argv = argv;
-	cld.git_cmd = 1;
-	cld.err = -1;
-	if (start_command(&cld))
+	argv_array_push(&cld->args, ".");
+	cld->git_cmd = 1;
+	cld->err = -1;
+	if (start_command(cld))
 		return -1;
 
 	close(0);
 	close(1);
 
-	copy_to_log(cld.err);
+	copy_to_log(cld->err);
 
-	return finish_command(&cld);
+	return finish_command(cld);
 }
 
-static int upload_pack(void)
+static int upload_pack(const struct argv_array *env)
 {
-	/* Timeout as string */
-	char timeout_buf[64];
-	const char *argv[] = { "upload-pack", "--strict", NULL, ".", NULL };
+	struct child_process cld = CHILD_PROCESS_INIT;
+	argv_array_pushl(&cld.args, "upload-pack", "--strict", NULL);
+	argv_array_pushf(&cld.args, "--timeout=%u", timeout);
 
-	argv[2] = timeout_buf;
+	argv_array_pushv(&cld.env_array, env->argv);
 
-	snprintf(timeout_buf, sizeof timeout_buf, "--timeout=%u", timeout);
-	return run_service_command(argv);
+	return run_service_command(&cld);
 }
 
-static int upload_archive(void)
+static int upload_archive(const struct argv_array *env)
 {
-	static const char *argv[] = { "upload-archive", ".", NULL };
-	return run_service_command(argv);
+	struct child_process cld = CHILD_PROCESS_INIT;
+	argv_array_push(&cld.args, "upload-archive");
+
+	argv_array_pushv(&cld.env_array, env->argv);
+
+	return run_service_command(&cld);
 }
 
-static int receive_pack(void)
+static int receive_pack(const struct argv_array *env)
 {
-	static const char *argv[] = { "receive-pack", ".", NULL };
-	return run_service_command(argv);
+	struct child_process cld = CHILD_PROCESS_INIT;
+	argv_array_push(&cld.args, "receive-pack");
+
+	argv_array_pushv(&cld.env_array, env->argv);
+
+	return run_service_command(&cld);
 }
 
 static struct daemon_service daemon_service[] = {
@@ -564,8 +582,11 @@ static void canonicalize_client(struct strbuf *out, const char *in)
 
 /*
  * Read the host as supplied by the client connection.
+ *
+ * Returns a pointer to the character after the NUL byte terminating the host
+ * arguemnt, or 'extra_args' if there is no host arguemnt.
  */
-static void parse_host_arg(struct hostinfo *hi, char *extra_args, int buflen)
+static char *parse_host_arg(struct hostinfo *hi, char *extra_args, int buflen)
 {
 	char *val;
 	int vallen;
@@ -593,6 +614,43 @@ static void parse_host_arg(struct hostinfo *hi, char *extra_args, int buflen)
 		if (extra_args < end && *extra_args)
 			die("Invalid request");
 	}
+
+	return extra_args;
+}
+
+static void parse_extra_args(struct hostinfo *hi, struct argv_array *env,
+			     char *extra_args, int buflen)
+{
+	const char *end = extra_args + buflen;
+	struct strbuf git_protocol = STRBUF_INIT;
+
+	/* First look for the host argument */
+	extra_args = parse_host_arg(hi, extra_args, buflen);
+
+	/* Look for additional arguments places after a second NUL byte */
+	for (; extra_args < end; extra_args += strlen(extra_args) + 1) {
+		const char *arg = extra_args;
+
+		/*
+		 * Parse the extra arguments, adding most to 'git_protocol'
+		 * which will be used to set the 'GIT_PROTOCOL' envvar in the
+		 * service that will be run.
+		 *
+		 * If there ends up being a particular arg in the future that
+		 * git-daemon needs to parse specificly (like the 'host' arg)
+		 * then it can be parsed here and not added to 'git_protocol'.
+		 */
+		if (*arg) {
+			if (git_protocol.len > 0)
+				strbuf_addch(&git_protocol, ':');
+			strbuf_addstr(&git_protocol, arg);
+		}
+	}
+
+	if (git_protocol.len > 0)
+		argv_array_pushf(env, GIT_PROTOCOL_ENVIRONMENT "=%s",
+				 git_protocol.buf);
+	strbuf_release(&git_protocol);
 }
 
 /*
@@ -669,18 +727,31 @@ static void hostinfo_clear(struct hostinfo *hi)
 	strbuf_release(&hi->tcp_port);
 }
 
+static void set_keep_alive(int sockfd)
+{
+	int ka = 1;
+
+	if (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka)) < 0) {
+		if (errno != ENOTSOCK)
+			logerror("unable to set SO_KEEPALIVE on socket: %s",
+				strerror(errno));
+	}
+}
+
 static int execute(void)
 {
 	char *line = packet_buffer;
 	int pktlen, len, i;
 	char *addr = getenv("REMOTE_ADDR"), *port = getenv("REMOTE_PORT");
 	struct hostinfo hi;
+	struct argv_array env = ARGV_ARRAY_INIT;
 
 	hostinfo_init(&hi);
 
 	if (addr)
 		loginfo("Connection from %s:%s", addr, port);
 
+	set_keep_alive(0);
 	alarm(init_timeout ? init_timeout : timeout);
 	pktlen = packet_read(0, NULL, NULL, packet_buffer, sizeof(packet_buffer), 0);
 	alarm(0);
@@ -695,8 +766,9 @@ static int execute(void)
 		pktlen--;
 	}
 
+	/* parse additional args hidden behind a NUL byte */
 	if (len != pktlen)
-		parse_host_arg(&hi, line + len + 1, pktlen - len - 1);
+		parse_extra_args(&hi, &env, line + len + 1, pktlen - len - 1);
 
 	for (i = 0; i < ARRAY_SIZE(daemon_service); i++) {
 		struct daemon_service *s = &(daemon_service[i]);
@@ -709,13 +781,15 @@ static int execute(void)
 			 * Note: The directory here is probably context sensitive,
 			 * and might depend on the actual service being performed.
 			 */
-			int rc = run_service(arg, s, &hi);
+			int rc = run_service(arg, s, &hi, &env);
 			hostinfo_clear(&hi);
+			argv_array_clear(&env);
 			return rc;
 		}
 	}
 
 	hostinfo_clear(&hi);
+	argv_array_clear(&env);
 	logerror("Protocol error: '%s'", line);
 	return -1;
 }
@@ -951,6 +1025,8 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 			continue;
 		}
 
+		set_keep_alive(sockfd);
+
 		if (bind(sockfd, ai->ai_addr, ai->ai_addrlen) < 0) {
 			logerror("Could not bind to %s: %s",
 				 ip2str(ai->ai_family, ai->ai_addr, ai->ai_addrlen),
@@ -1009,6 +1085,8 @@ static int setup_named_sock(char *listen_addr, int listen_port, struct socketlis
 		close(sockfd);
 		return 0;
 	}
+
+	set_keep_alive(sockfd);
 
 	if ( bind(sockfd, (struct sockaddr *)&sin, sizeof sin) < 0 ) {
 		logerror("Could not bind to %s: %s",
@@ -1178,7 +1256,7 @@ static int serve(struct string_list *listen_addr, int listen_port,
 	return service_loop(&socklist);
 }
 
-int main(int argc, char **argv)
+int cmd_main(int argc, const char **argv)
 {
 	int listen_port = 0;
 	struct string_list listen_addr = STRING_LIST_INIT_NODUP;
@@ -1188,12 +1266,8 @@ int main(int argc, char **argv)
 	struct credentials *cred = NULL;
 	int i;
 
-	git_setup_gettext();
-
-	git_extract_argv0_path(argv[0]);
-
 	for (i = 1; i < argc; i++) {
-		char *arg = argv[i];
+		const char *arg = argv[i];
 		const char *v;
 
 		if (skip_prefix(arg, "--listen=", &v)) {
@@ -1367,8 +1441,7 @@ int main(int argc, char **argv)
 	if (detach) {
 		if (daemonize())
 			die("--detach not supported on this platform");
-	} else
-		sanitize_stdfds();
+	}
 
 	if (pid_file)
 		write_file(pid_file, "%"PRIuMAX, (uintmax_t) getpid());

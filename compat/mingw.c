@@ -286,6 +286,49 @@ int mingw_rmdir(const char *pathname)
 	return ret;
 }
 
+static inline int needs_hiding(const char *path)
+{
+	const char *basename;
+
+	if (hide_dotfiles == HIDE_DOTFILES_FALSE)
+		return 0;
+
+	/* We cannot use basename(), as it would remove trailing slashes */
+	mingw_skip_dos_drive_prefix((char **)&path);
+	if (!*path)
+		return 0;
+
+	for (basename = path; *path; path++)
+		if (is_dir_sep(*path)) {
+			do {
+				path++;
+			} while (is_dir_sep(*path));
+			/* ignore trailing slashes */
+			if (*path)
+				basename = path;
+		}
+
+	if (hide_dotfiles == HIDE_DOTFILES_TRUE)
+		return *basename == '.';
+
+	assert(hide_dotfiles == HIDE_DOTFILES_DOTGITONLY);
+	return !strncasecmp(".git", basename, 4) &&
+		(!basename[4] || is_dir_sep(basename[4]));
+}
+
+static int set_hidden_flag(const wchar_t *path, int set)
+{
+	DWORD original = GetFileAttributesW(path), modified;
+	if (set)
+		modified = original | FILE_ATTRIBUTE_HIDDEN;
+	else
+		modified = original & ~FILE_ATTRIBUTE_HIDDEN;
+	if (original == modified || SetFileAttributesW(path, modified))
+		return 0;
+	errno = err_win_to_posix(GetLastError());
+	return -1;
+}
+
 int mingw_mkdir(const char *path, int mode)
 {
 	int ret;
@@ -293,6 +336,8 @@ int mingw_mkdir(const char *path, int mode)
 	if (xutftowcs_path(wpath, path) < 0)
 		return -1;
 	ret = _wmkdir(wpath);
+	if (!ret && needs_hiding(path))
+		return set_hidden_flag(wpath, 1);
 	return ret;
 }
 
@@ -318,6 +363,21 @@ int mingw_open (const char *filename, int oflags, ...)
 		DWORD attrs = GetFileAttributesW(wfilename);
 		if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
 			errno = EISDIR;
+	}
+	if ((oflags & O_CREAT) && needs_hiding(filename)) {
+		/*
+		 * Internally, _wopen() uses the CreateFile() API which errors
+		 * out with an ERROR_ACCESS_DENIED if CREATE_ALWAYS was
+		 * specified and an already existing file's attributes do not
+		 * match *exactly*. As there is no mode or flag we can set that
+		 * would correspond to FILE_ATTRIBUTE_HIDDEN, let's just try
+		 * again *without* the O_CREAT flag (that corresponds to the
+		 * CREATE_ALWAYS flag of CreateFile()).
+		 */
+		if (fd < 0 && errno == EACCES)
+			fd = _wopen(wfilename, oflags & ~O_CREAT, mode);
+		if (fd >= 0 && set_hidden_flag(wfilename, 1))
+			warning("could not mark '%s' as hidden.", filename);
 	}
 	return fd;
 }
@@ -350,6 +410,7 @@ int mingw_fgetc(FILE *stream)
 #undef fopen
 FILE *mingw_fopen (const char *filename, const char *otype)
 {
+	int hide = needs_hiding(filename);
 	FILE *file;
 	wchar_t wfilename[MAX_PATH], wotype[4];
 	if (filename && !strcmp(filename, "/dev/null"))
@@ -357,12 +418,21 @@ FILE *mingw_fopen (const char *filename, const char *otype)
 	if (xutftowcs_path(wfilename, filename) < 0 ||
 		xutftowcs(wotype, otype, ARRAY_SIZE(wotype)) < 0)
 		return NULL;
+	if (hide && !access(filename, F_OK) && set_hidden_flag(wfilename, 0)) {
+		error("could not unhide %s", filename);
+		return NULL;
+	}
 	file = _wfopen(wfilename, wotype);
+	if (!file && GetLastError() == ERROR_INVALID_NAME)
+		errno = ENOENT;
+	if (file && hide && set_hidden_flag(wfilename, 1))
+		warning("could not mark '%s' as hidden.", filename);
 	return file;
 }
 
 FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream)
 {
+	int hide = needs_hiding(filename);
 	FILE *file;
 	wchar_t wfilename[MAX_PATH], wotype[4];
 	if (filename && !strcmp(filename, "/dev/null"))
@@ -370,7 +440,13 @@ FILE *mingw_freopen (const char *filename, const char *otype, FILE *stream)
 	if (xutftowcs_path(wfilename, filename) < 0 ||
 		xutftowcs(wotype, otype, ARRAY_SIZE(wotype)) < 0)
 		return NULL;
+	if (hide && !access(filename, F_OK) && set_hidden_flag(wfilename, 0)) {
+		error("could not unhide %s", filename);
+		return NULL;
+	}
 	file = _wfreopen(wfilename, wotype, stream);
+	if (file && hide && set_hidden_flag(wfilename, 1))
+		warning("could not mark '%s' as hidden.", filename);
 	return file;
 }
 
@@ -763,15 +839,12 @@ struct tm *localtime_r(const time_t *timep, struct tm *result)
 
 char *mingw_getcwd(char *pointer, int len)
 {
-	int i;
 	wchar_t wpointer[MAX_PATH];
 	if (!_wgetcwd(wpointer, ARRAY_SIZE(wpointer)))
 		return NULL;
 	if (xwcstoutf(pointer, wpointer, len) < 0)
 		return NULL;
-	for (i = 0; pointer[i]; i++)
-		if (pointer[i] == '\\')
-			pointer[i] = '/';
+	convert_slashes(pointer);
 	return pointer;
 }
 
@@ -870,64 +943,14 @@ static const char *parse_interpreter(const char *cmd)
 }
 
 /*
- * Splits the PATH into parts.
- */
-static char **get_path_split(void)
-{
-	char *p, **path, *envpath = mingw_getenv("PATH");
-	int i, n = 0;
-
-	if (!envpath || !*envpath)
-		return NULL;
-
-	envpath = xstrdup(envpath);
-	p = envpath;
-	while (p) {
-		char *dir = p;
-		p = strchr(p, ';');
-		if (p) *p++ = '\0';
-		if (*dir) {	/* not earlier, catches series of ; */
-			++n;
-		}
-	}
-	if (!n)
-		return NULL;
-
-	ALLOC_ARRAY(path, n + 1);
-	p = envpath;
-	i = 0;
-	do {
-		if (*p)
-			path[i++] = xstrdup(p);
-		p = p+strlen(p)+1;
-	} while (i < n);
-	path[i] = NULL;
-
-	free(envpath);
-
-	return path;
-}
-
-static void free_path_split(char **path)
-{
-	char **p = path;
-
-	if (!path)
-		return;
-
-	while (*p)
-		free(*p++);
-	free(path);
-}
-
-/*
  * exe_only means that we only want to detect .exe files, but not scripts
  * (which do not have an extension)
  */
-static char *lookup_prog(const char *dir, const char *cmd, int isexe, int exe_only)
+static char *lookup_prog(const char *dir, int dirlen, const char *cmd,
+			 int isexe, int exe_only)
 {
 	char path[MAX_PATH];
-	snprintf(path, sizeof(path), "%s/%s.exe", dir, cmd);
+	snprintf(path, sizeof(path), "%.*s\\%s.exe", dirlen, dir, cmd);
 
 	if (!isexe && access(path, F_OK) == 0)
 		return xstrdup(path);
@@ -942,17 +965,29 @@ static char *lookup_prog(const char *dir, const char *cmd, int isexe, int exe_on
  * Determines the absolute path of cmd using the split path in path.
  * If cmd contains a slash or backslash, no lookup is performed.
  */
-static char *path_lookup(const char *cmd, char **path, int exe_only)
+static char *path_lookup(const char *cmd, int exe_only)
 {
+	const char *path;
 	char *prog = NULL;
 	int len = strlen(cmd);
 	int isexe = len >= 4 && !strcasecmp(cmd+len-4, ".exe");
 
 	if (strchr(cmd, '/') || strchr(cmd, '\\'))
-		prog = xstrdup(cmd);
+		return xstrdup(cmd);
 
-	while (!prog && *path)
-		prog = lookup_prog(*path++, cmd, isexe, exe_only);
+	path = mingw_getenv("PATH");
+	if (!path)
+		return NULL;
+
+	while (!prog) {
+		const char *sep = strchrnul(path, ';');
+		int dirlen = sep - path;
+		if (dirlen)
+			prog = lookup_prog(path, dirlen, cmd, isexe, exe_only);
+		if (!*sep)
+			break;
+		path = sep + 1;
+	}
 
 	return prog;
 }
@@ -1119,8 +1154,7 @@ pid_t mingw_spawnvpe(const char *cmd, const char **argv, char **deltaenv,
 		     int fhin, int fhout, int fherr)
 {
 	pid_t pid;
-	char **path = get_path_split();
-	char *prog = path_lookup(cmd, path, 0);
+	char *prog = path_lookup(cmd, 0);
 
 	if (!prog) {
 		errno = ENOENT;
@@ -1131,7 +1165,7 @@ pid_t mingw_spawnvpe(const char *cmd, const char **argv, char **deltaenv,
 
 		if (interpr) {
 			const char *argv0 = argv[0];
-			char *iprog = path_lookup(interpr, path, 1);
+			char *iprog = path_lookup(interpr, 1);
 			argv[0] = prog;
 			if (!iprog) {
 				errno = ENOENT;
@@ -1149,21 +1183,18 @@ pid_t mingw_spawnvpe(const char *cmd, const char **argv, char **deltaenv,
 					       fhin, fhout, fherr);
 		free(prog);
 	}
-	free_path_split(path);
 	return pid;
 }
 
 static int try_shell_exec(const char *cmd, char *const *argv)
 {
 	const char *interpr = parse_interpreter(cmd);
-	char **path;
 	char *prog;
 	int pid = 0;
 
 	if (!interpr)
 		return 0;
-	path = get_path_split();
-	prog = path_lookup(interpr, path, 1);
+	prog = path_lookup(interpr, 1);
 	if (prog) {
 		int argc = 0;
 		const char **argv2;
@@ -1182,7 +1213,6 @@ static int try_shell_exec(const char *cmd, char *const *argv)
 		free(prog);
 		free(argv2);
 	}
-	free_path_split(path);
 	return pid;
 }
 
@@ -1204,8 +1234,7 @@ int mingw_execv(const char *cmd, char *const *argv)
 
 int mingw_execvp(const char *cmd, char *const *argv)
 {
-	char **path = get_path_split();
-	char *prog = path_lookup(cmd, path, 0);
+	char *prog = path_lookup(cmd, 0);
 
 	if (prog) {
 		mingw_execv(prog, argv);
@@ -1213,7 +1242,6 @@ int mingw_execvp(const char *cmd, char *const *argv)
 	} else
 		errno = ENOENT;
 
-	free_path_split(path);
 	return -1;
 }
 
@@ -1859,48 +1887,6 @@ int mingw_raise(int sig)
 	}
 }
 
-
-static const char *make_backslash_path(const char *path)
-{
-	static char buf[PATH_MAX + 1];
-	char *c;
-
-	if (strlcpy(buf, path, PATH_MAX) >= PATH_MAX)
-		die("Too long path: %.*s", 60, path);
-
-	for (c = buf; *c; c++) {
-		if (*c == '/')
-			*c = '\\';
-	}
-	return buf;
-}
-
-void mingw_open_html(const char *unixpath)
-{
-	const char *htmlpath = make_backslash_path(unixpath);
-	typedef HINSTANCE (WINAPI *T)(HWND, const char *,
-			const char *, const char *, const char *, INT);
-	T ShellExecute;
-	HMODULE shell32;
-	int r;
-
-	shell32 = LoadLibrary("shell32.dll");
-	if (!shell32)
-		die("cannot load shell32.dll");
-	ShellExecute = (T)GetProcAddress(shell32, "ShellExecuteA");
-	if (!ShellExecute)
-		die("cannot run browser");
-
-	printf("Launching default browser to display HTML ...\n");
-	r = HCAST(int, ShellExecute(NULL, "open", htmlpath,
-				NULL, "\\", SW_SHOWNORMAL));
-	FreeLibrary(shell32);
-	/* see the MSDN documentation referring to the result codes here */
-	if (r <= 32) {
-		die("failed to launch browser for %.*s", MAX_PATH, unixpath);
-	}
-}
-
 int link(const char *oldpath, const char *newpath)
 {
 	typedef BOOL (WINAPI *T)(LPCWSTR, LPCWSTR, LPSECURITY_ATTRIBUTES);
@@ -2091,7 +2077,7 @@ int xwcstoutf(char *utf, const wchar_t *wcs, size_t utflen)
 	return -1;
 }
 
-static void setup_windows_environment()
+static void setup_windows_environment(void)
 {
 	char *tmp = getenv("TMPDIR");
 
@@ -2112,9 +2098,7 @@ static void setup_windows_environment()
 		 * executable (by not mistaking the dir separators
 		 * for escape characters).
 		 */
-		for (; *tmp; tmp++)
-			if (*tmp == '\\')
-				*tmp = '/';
+		convert_slashes(tmp);
 	}
 
 	/* simulate TERM to enable auto-color (see color.c) */
@@ -2135,7 +2119,7 @@ typedef struct {
 extern int __wgetmainargs(int *argc, wchar_t ***argv, wchar_t ***env, int glob,
 		_startupinfo *si);
 
-static NORETURN void die_startup()
+static NORETURN void die_startup(void)
 {
 	fputs("fatal: not enough memory for initialization", stderr);
 	exit(128);
@@ -2155,12 +2139,70 @@ static char *wcstoutfdup_startup(char *buffer, const wchar_t *wcs, size_t len)
 	return memcpy(malloc_startup(len), buffer, len);
 }
 
-void mingw_startup()
+static void maybe_redirect_std_handle(const wchar_t *key, DWORD std_id, int fd,
+				      DWORD desired_access, DWORD flags)
+{
+	DWORD create_flag = fd ? OPEN_ALWAYS : OPEN_EXISTING;
+	wchar_t buf[MAX_PATH];
+	DWORD max = ARRAY_SIZE(buf);
+	HANDLE handle;
+	DWORD ret = GetEnvironmentVariableW(key, buf, max);
+
+	if (!ret || ret >= max)
+		return;
+
+	/* make sure this does not leak into child processes */
+	SetEnvironmentVariableW(key, NULL);
+	if (!wcscmp(buf, L"off")) {
+		close(fd);
+		handle = GetStdHandle(std_id);
+		if (handle != INVALID_HANDLE_VALUE)
+			CloseHandle(handle);
+		return;
+	}
+	if (std_id == STD_ERROR_HANDLE && !wcscmp(buf, L"2>&1")) {
+		handle = GetStdHandle(STD_OUTPUT_HANDLE);
+		if (handle == INVALID_HANDLE_VALUE) {
+			close(fd);
+			handle = GetStdHandle(std_id);
+			if (handle != INVALID_HANDLE_VALUE)
+				CloseHandle(handle);
+		} else {
+			int new_fd = _open_osfhandle((intptr_t)handle, O_BINARY);
+			SetStdHandle(std_id, handle);
+			dup2(new_fd, fd);
+			/* do *not* close the new_fd: that would close stdout */
+		}
+		return;
+	}
+	handle = CreateFileW(buf, desired_access, 0, NULL, create_flag,
+			     flags, NULL);
+	if (handle != INVALID_HANDLE_VALUE) {
+		int new_fd = _open_osfhandle((intptr_t)handle, O_BINARY);
+		SetStdHandle(std_id, handle);
+		dup2(new_fd, fd);
+		close(new_fd);
+	}
+}
+
+static void maybe_redirect_std_handles(void)
+{
+	maybe_redirect_std_handle(L"GIT_REDIRECT_STDIN", STD_INPUT_HANDLE, 0,
+				  GENERIC_READ, FILE_ATTRIBUTE_NORMAL);
+	maybe_redirect_std_handle(L"GIT_REDIRECT_STDOUT", STD_OUTPUT_HANDLE, 1,
+				  GENERIC_WRITE, FILE_ATTRIBUTE_NORMAL);
+	maybe_redirect_std_handle(L"GIT_REDIRECT_STDERR", STD_ERROR_HANDLE, 2,
+				  GENERIC_WRITE, FILE_FLAG_NO_BUFFERING);
+}
+
+void mingw_startup(void)
 {
 	int i, maxlen, argc;
 	char *buffer;
 	wchar_t **wenv, **wargv;
 	_startupinfo si;
+
+	maybe_redirect_std_handles();
 
 	/* get wide char arguments and environment */
 	si.newmode = 0;

@@ -14,8 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "git-compat-util.h"
 #include "ewok.h"
@@ -142,8 +141,8 @@ int ewah_read_mmap(struct ewah_bitmap *self, const void *map, size_t len)
 	 * the endianness conversion in a separate pass to ensure
 	 * we're loading 8-byte aligned words.
 	 */
-	memcpy(self->buffer, ptr, self->buffer_size * sizeof(uint64_t));
-	ptr += self->buffer_size * sizeof(uint64_t);
+	memcpy(self->buffer, ptr, self->buffer_size * sizeof(eword_t));
+	ptr += self->buffer_size * sizeof(eword_t);
 
 	for (i = 0; i < self->buffer_size; ++i)
 		self->buffer[i] = ntohll(self->buffer[i]);

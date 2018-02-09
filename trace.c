@@ -18,22 +18,19 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "cache.h"
 #include "quote.h"
 
+struct trace_key trace_default_key = { "GIT_TRACE", 0, 0, 0 };
+struct trace_key trace_perf_key = TRACE_KEY_INIT(PERFORMANCE);
+
 /* Get a trace file descriptor from "key" env variable. */
 static int get_trace_fd(struct trace_key *key)
 {
-	static struct trace_key trace_default = { "GIT_TRACE" };
 	const char *trace;
-
-	/* use default "GIT_TRACE" if NULL */
-	if (!key)
-		key = &trace_default;
 
 	/* don't open twice */
 	if (key->initialized)
@@ -51,22 +48,19 @@ static int get_trace_fd(struct trace_key *key)
 	else if (is_absolute_path(trace)) {
 		int fd = open(trace, O_WRONLY | O_APPEND | O_CREAT, 0666);
 		if (fd == -1) {
-			fprintf(stderr,
-				"Could not open '%s' for tracing: %s\n"
-				"Defaulting to tracing on stderr...\n",
+			warning("could not open '%s' for tracing: %s",
 				trace, strerror(errno));
-			key->fd = STDERR_FILENO;
+			trace_disable(key);
 		} else {
 			key->fd = fd;
 			key->need_close = 1;
 		}
 	} else {
-		fprintf(stderr, "What does '%s' for %s mean?\n"
-			"If you want to trace into a file, then please set "
-			"%s to an absolute pathname (starting with /).\n"
-			"Defaulting to tracing on stderr...\n",
-			trace, key->key, key->key);
-		key->fd = STDERR_FILENO;
+		warning("unknown trace value for '%s': %s\n"
+			"         If you want to trace into a file, then please set %s\n"
+			"         to an absolute pathname (starting with /)",
+			key->key, trace, key->key);
+		trace_disable(key);
 	}
 
 	key->initialized = 1;
@@ -81,9 +75,6 @@ void trace_disable(struct trace_key *key)
 	key->initialized = 1;
 	key->need_close = 0;
 }
-
-static const char err_msg[] = "Could not trace into fd given by "
-	"GIT_TRACE environment variable";
 
 static int prepare_trace_line(const char *file, int line,
 			      struct trace_key *key, struct strbuf *buf)
@@ -120,18 +111,26 @@ static int prepare_trace_line(const char *file, int line,
 	return 1;
 }
 
+static void trace_write(struct trace_key *key, const void *buf, unsigned len)
+{
+	if (write_in_full(get_trace_fd(key), buf, len) < 0) {
+		warning("unable to write trace for %s: %s",
+			key->key, strerror(errno));
+		trace_disable(key);
+	}
+}
+
 void trace_verbatim(struct trace_key *key, const void *buf, unsigned len)
 {
 	if (!trace_want(key))
 		return;
-	write_or_whine_pipe(get_trace_fd(key), buf, len, err_msg);
+	trace_write(key, buf, len);
 }
 
 static void print_trace_line(struct trace_key *key, struct strbuf *buf)
 {
 	strbuf_complete_line(buf);
-
-	write_or_whine_pipe(get_trace_fd(key), buf->buf, buf->len, err_msg);
+	trace_write(key, buf->buf, buf->len);
 	strbuf_release(buf);
 }
 
@@ -153,13 +152,13 @@ static void trace_argv_vprintf_fl(const char *file, int line,
 {
 	struct strbuf buf = STRBUF_INIT;
 
-	if (!prepare_trace_line(file, line, NULL, &buf))
+	if (!prepare_trace_line(file, line, &trace_default_key, &buf))
 		return;
 
 	strbuf_vaddf(&buf, format, ap);
 
 	sq_quote_argv(&buf, argv, 0);
-	print_trace_line(NULL, &buf);
+	print_trace_line(&trace_default_key, &buf);
 }
 
 void trace_strbuf_fl(const char *file, int line, struct trace_key *key,
@@ -173,8 +172,6 @@ void trace_strbuf_fl(const char *file, int line, struct trace_key *key,
 	strbuf_addbuf(&buf, data);
 	print_trace_line(key, &buf);
 }
-
-static struct trace_key trace_perf_key = TRACE_KEY_INIT(PERFORMANCE);
 
 static void trace_performance_vprintf_fl(const char *file, int line,
 					 uint64_t nanos, const char *format,
@@ -201,7 +198,7 @@ void trace_printf(const char *format, ...)
 {
 	va_list ap;
 	va_start(ap, format);
-	trace_vprintf_fl(NULL, 0, NULL, format, ap);
+	trace_vprintf_fl(NULL, 0, &trace_default_key, format, ap);
 	va_end(ap);
 }
 

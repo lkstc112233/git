@@ -59,9 +59,10 @@ require Exporter;
                 command_bidi_pipe command_close_bidi_pipe
                 version exec_path html_path hash_object git_cmd_try
                 remote_refs prompt
-                get_tz_offset
+                get_tz_offset get_record
                 credential credential_read credential_write
-                temp_acquire temp_is_locked temp_release temp_reset temp_path);
+                temp_acquire temp_is_locked temp_release temp_reset temp_path
+                unquote_path);
 
 
 =head1 DESCRIPTION
@@ -393,7 +394,7 @@ sub command_close_pipe {
 Execute the given C<COMMAND> in the same way as command_output_pipe()
 does but return both an input pipe filehandle and an output pipe filehandle.
 
-The function will return return C<($pid, $pipe_in, $pipe_out, $ctx)>.
+The function will return C<($pid, $pipe_in, $pipe_out, $ctx)>.
 See C<command_close_bidi_pipe()> for details.
 
 =cut
@@ -531,13 +532,27 @@ If TIME is not supplied, the current local time is used.
 =cut
 
 sub get_tz_offset {
-	# some systmes don't handle or mishandle %z, so be creative.
+	# some systems don't handle or mishandle %z, so be creative.
 	my $t = shift || time;
 	my $gm = timegm(localtime($t));
 	my $sign = qw( + + - )[ $gm <=> $t ];
 	return sprintf("%s%02d%02d", $sign, (gmtime(abs($t - $gm)))[2,1]);
 }
 
+=item get_record ( FILEHANDLE, INPUT_RECORD_SEPARATOR )
+
+Read one record from FILEHANDLE delimited by INPUT_RECORD_SEPARATOR,
+removing any trailing INPUT_RECORD_SEPARATOR.
+
+=cut
+
+sub get_record {
+	my ($fh, $rs) = @_;
+	local $/ = $rs;
+	my $rec = <$fh>;
+	chomp $rec if defined $rs;
+	$rec;
+}
 
 =item prompt ( PROMPT , ISPASSWORD  )
 
@@ -863,74 +878,6 @@ sub ident_person {
 	my ($self, @ident) = _maybe_self(@_);
 	$#ident == 0 and @ident = $self ? $self->ident($ident[0]) : ident($ident[0]);
 	return "$ident[0] <$ident[1]>";
-}
-
-=item parse_mailboxes
-
-Return an array of mailboxes extracted from a string.
-
-=cut
-
-sub parse_mailboxes {
-	my $re_comment = qr/\((?:[^)]*)\)/;
-	my $re_quote = qr/"(?:[^\"\\]|\\.)*"/;
-	my $re_word = qr/(?:[^]["\s()<>:;@\\,.]|\\.)+/;
-
-	# divide the string in tokens of the above form
-	my $re_token = qr/(?:$re_quote|$re_word|$re_comment|\S)/;
-	my @tokens = map { $_ =~ /\s*($re_token)\s*/g } @_;
-
-	# add a delimiter to simplify treatment for the last mailbox
-	push @tokens, ",";
-
-	my (@addr_list, @phrase, @address, @comment, @buffer) = ();
-	foreach my $token (@tokens) {
-		if ($token =~ /^[,;]$/) {
-			# if buffer still contains undeterminated strings
-			# append it at the end of @address or @phrase
-			if (@address) {
-				push @address, @buffer;
-			} else {
-				push @phrase, @buffer;
-			}
-
-			my $str_phrase = join ' ', @phrase;
-			my $str_address = join '', @address;
-			my $str_comment = join ' ', @comment;
-
-			# quote are necessary if phrase contains
-			# special characters
-			if ($str_phrase =~ /[][()<>:;@\\,.\000-\037\177]/) {
-				$str_phrase =~ s/(^|[^\\])"/$1/g;
-				$str_phrase = qq["$str_phrase"];
-			}
-
-			# add "<>" around the address if necessary
-			if ($str_address ne "" && $str_phrase ne "") {
-				$str_address = qq[<$str_address>];
-			}
-
-			my $str_mailbox = "$str_phrase $str_address $str_comment";
-			$str_mailbox =~ s/^\s*|\s*$//g;
-			push @addr_list, $str_mailbox if ($str_mailbox);
-
-			@phrase = @address = @comment = @buffer = ();
-		} elsif ($token =~ /^\(/) {
-			push @comment, $token;
-		} elsif ($token eq "<") {
-			push @phrase, (splice @address), (splice @buffer);
-		} elsif ($token eq ">") {
-			push @address, (splice @buffer);
-		} elsif ($token eq "@") {
-			push @address, (splice @buffer), "@";
-		} elsif ($token eq ".") {
-			push @address, (splice @buffer), ".";
-		} else {
-			push @buffer, $token;
-		}
-	}
-
-	return @addr_list;
 }
 
 =item hash_object ( TYPE, FILENAME )
@@ -1420,6 +1367,95 @@ sub END {
 }
 
 } # %TEMP_* Lexical Context
+
+=item prefix_lines ( PREFIX, STRING [, STRING... ])
+
+Prefixes lines in C<STRING> with C<PREFIX>.
+
+=cut
+
+sub prefix_lines {
+	my $prefix = shift;
+	my $string = join("\n", @_);
+	$string =~ s/^/$prefix/mg;
+	return $string;
+}
+
+=item unquote_path ( PATH )
+
+Unquote a quoted path containing c-escapes as returned by ls-files etc.
+when not using -z or when parsing the output of diff -u.
+
+=cut
+
+{
+	my %cquote_map = (
+		"a" => chr(7),
+		"b" => chr(8),
+		"t" => chr(9),
+		"n" => chr(10),
+		"v" => chr(11),
+		"f" => chr(12),
+		"r" => chr(13),
+		"\\" => "\\",
+		"\042" => "\042",
+	);
+
+	sub unquote_path {
+		local ($_) = @_;
+		my ($retval, $remainder);
+		if (!/^\042(.*)\042$/) {
+			return $_;
+		}
+		($_, $retval) = ($1, "");
+		while (/^([^\\]*)\\(.*)$/) {
+			$remainder = $2;
+			$retval .= $1;
+			for ($remainder) {
+				if (/^([0-3][0-7][0-7])(.*)$/) {
+					$retval .= chr(oct($1));
+					$_ = $2;
+					last;
+				}
+				if (/^([\\\042abtnvfr])(.*)$/) {
+					$retval .= $cquote_map{$1};
+					$_ = $2;
+					last;
+				}
+				# This is malformed
+				throw Error::Simple("invalid quoted path $_[0]");
+			}
+			$_ = $remainder;
+		}
+		$retval .= $_;
+		return $retval;
+	}
+}
+
+=item get_comment_line_char ( )
+
+Gets the core.commentchar configuration value.
+The value falls-back to '#' if core.commentchar is set to 'auto'.
+
+=cut
+
+sub get_comment_line_char {
+	my $comment_line_char = config("core.commentchar") || '#';
+	$comment_line_char = '#' if ($comment_line_char eq 'auto');
+	$comment_line_char = '#' if (length($comment_line_char) != 1);
+	return $comment_line_char;
+}
+
+=item comment_lines ( STRING [, STRING... ])
+
+Comments lines following core.commentchar configuration.
+
+=cut
+
+sub comment_lines {
+	my $comment_line_char = get_comment_line_char;
+	return prefix_lines("$comment_line_char ", @_);
+}
 
 =back
 

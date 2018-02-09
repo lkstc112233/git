@@ -14,8 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "git-compat-util.h"
 #include "ewok.h"
@@ -210,8 +209,8 @@ size_t ewah_add(struct ewah_bitmap *self, eword_t word)
 void ewah_set(struct ewah_bitmap *self, size_t i)
 {
 	const size_t dist =
-		(i + BITS_IN_EWORD) / BITS_IN_EWORD -
-		(self->bit_size + BITS_IN_EWORD - 1) / BITS_IN_EWORD;
+		DIV_ROUND_UP(i + 1, BITS_IN_EWORD) -
+		DIV_ROUND_UP(self->bit_size, BITS_IN_EWORD);
 
 	assert(i >= self->bit_size);
 

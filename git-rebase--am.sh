@@ -9,8 +9,8 @@
 # below were not inside any function, and expected to return
 # to the function that dot-sourced us.
 #
-# However, FreeBSD /bin/sh misbehaves on such a construct and
-# continues to run the statements that follow such a "return".
+# However, older (9.x) versions of FreeBSD /bin/sh misbehave on such a
+# construct and continue to run the statements that follow such a "return".
 # As a work-around, we introduce an extra layer of a function
 # here, and immediately call it after defining it.
 git_rebase__am () {
@@ -45,7 +45,7 @@ then
 	# itself well to recording empty patches.  fortunately, cherry-pick
 	# makes this easy
 	git cherry-pick ${gpg_sign_opt:+"$gpg_sign_opt"} --allow-empty \
-		--right-only "$revisions" \
+		$allow_rerere_autoupdate --right-only "$revisions" \
 		${restrict_revision+^$restrict_revision}
 	ret=$?
 else
@@ -53,6 +53,8 @@ else
 
 	git format-patch -k --stdout --full-index --cherry-pick --right-only \
 		--src-prefix=a/ --dst-prefix=b/ --no-renames --no-cover-letter \
+		--pretty=mboxrd \
+		$git_format_patch_opt \
 		"$revisions" ${restrict_revision+^$restrict_revision} \
 		>"$GIT_DIR/rebased-patches"
 	ret=$?
@@ -82,6 +84,8 @@ else
 	fi
 
 	git am $git_am_opt --rebasing --resolvemsg="$resolvemsg" \
+		--patch-format=mboxrd \
+		$allow_rerere_autoupdate \
 		${gpg_sign_opt:+"$gpg_sign_opt"} <"$GIT_DIR/rebased-patches"
 	ret=$?
 

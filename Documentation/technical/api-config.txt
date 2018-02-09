@@ -63,13 +63,6 @@ parse for configuration, rather than looking in the usual files. Regular
 Specify whether include directives should be followed in parsed files.
 Regular `git_config` defaults to `1`.
 
-There is a special version of `git_config` called `git_config_early`.
-This version takes an additional parameter to specify the repository
-config, instead of having it looked up via `git_path`. This is useful
-early in a Git program before the repository has been found. Unless
-you're working with early setup code, you probably don't want to use
-this.
-
 Reading Specific Files
 ----------------------
 
@@ -193,7 +186,7 @@ parsing is successful, the return value is the result.
 Same as `git_config_bool`, except that integers are returned as-is, and
 an `is_bool` flag is unset.
 
-`git_config_maybe_bool`::
+`git_parse_maybe_bool`::
 Same as `git_config_bool`, except that it returns -1 on error rather
 than dying.
 

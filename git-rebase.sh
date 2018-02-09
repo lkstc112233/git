@@ -9,7 +9,7 @@ OPTIONS_STUCKLONG=t
 OPTIONS_SPEC="\
 git rebase [-i] [options] [--exec <cmd>] [--onto <newbase>] [<upstream>] [<branch>]
 git rebase [-i] [options] [--exec <cmd>] [--onto <newbase>] --root [<branch>]
-git-rebase --continue | --abort | --skip | --edit-todo
+git rebase --continue | --abort | --skip | --edit-todo
 --
  Available options are
 v,verbose!         display a diffstat of what changed upstream
@@ -34,6 +34,7 @@ root!              rebase all reachable commits up to the root(s)
 autosquash         move commits that begin with squash!/fixup! under -i
 committer-date-is-author-date! passed to 'git am'
 ignore-date!       passed to 'git am'
+signoff            passed to 'git am'
 whitespace=!       passed to 'git apply'
 ignore-whitespace! passed to 'git apply'
 C=!                passed to 'git apply'
@@ -43,9 +44,9 @@ continue!          continue
 abort!             abort and check out the original branch
 skip!              skip current patch and continue
 edit-todo!         edit the todo list during an interactive rebase
+quit!              abort but keep HEAD where it is
 "
 . git-sh-setup
-. git-sh-i18n
 set_reflog_action rebase
 require_work_tree_exists
 cd_to_toplevel
@@ -54,9 +55,10 @@ LF='
 '
 ok_to_skip_pre_rebase=
 resolvemsg="
-$(gettext 'When you have resolved this problem, run "git rebase --continue".
-If you prefer to skip this patch, run "git rebase --skip" instead.
-To check out the original branch and stop rebasing, run "git rebase --abort".')
+$(gettext 'Resolve all conflicts manually, mark them as resolved with
+"git add/rm <conflicted_files>", then run "git rebase --continue".
+You can instead skip this commit: run "git rebase --skip".
+To abort and get back to the state before "git rebase", run "git rebase --abort".')
 "
 unset onto
 unset restrict_revision
@@ -72,6 +74,7 @@ test "$(git config --bool rebase.stat)" = true && diffstat=t
 autostash="$(git config --bool rebase.autostash || echo false)"
 fork_point=auto
 git_am_opt=
+git_format_patch_opt=
 rebase_root=
 force_rebase=
 allow_rerere_autoupdate=
@@ -87,7 +90,10 @@ preserve_merges=
 autosquash=
 keep_empty=
 test "$(git config --bool rebase.autosquash)" = "true" && autosquash=t
-gpg_sign_opt=
+case "$(git config --bool commit.gpgsign)" in
+true)	gpg_sign_opt=-S ;;
+*)	gpg_sign_opt= ;;
+esac
 
 read_basic_state () {
 	test -f "$state_dir/head-name" &&
@@ -151,7 +157,7 @@ move_to_original_branch () {
 		git symbolic-ref \
 			-m "rebase finished: returning to $head_name" \
 			HEAD $head_name ||
-		die "$(gettext "Could not move back to $head_name")"
+		die "$(eval_gettext "Could not move back to \$head_name")"
 		;;
 	esac
 }
@@ -160,16 +166,16 @@ apply_autostash () {
 	if test -f "$state_dir/autostash"
 	then
 		stash_sha1=$(cat "$state_dir/autostash")
-		if git stash apply $stash_sha1 2>&1 >/dev/null
+		if git stash apply $stash_sha1 >/dev/null 2>&1
 		then
-			echo "$(gettext 'Applied autostash.')"
+			echo "$(gettext 'Applied autostash.')" >&2
 		else
 			git stash store -m "autostash" -q $stash_sha1 ||
 			die "$(eval_gettext "Cannot store \$stash_sha1")"
 			gettext 'Applying autostash resulted in conflicts.
 Your changes are safe in the stash.
 You can run "git stash pop" or "git stash drop" at any time.
-'
+' >&2
 		fi
 	fi
 }
@@ -210,7 +216,7 @@ run_pre_rebase_hook () {
 }
 
 test -f "$apply_dir"/applying &&
-	die "$(gettext "It looks like git-am is in progress. Cannot rebase.")"
+	die "$(gettext "It looks like 'git am' is in progress. Cannot rebase.")"
 
 if test -d "$apply_dir"
 then
@@ -239,7 +245,7 @@ do
 	--verify)
 		ok_to_skip_pre_rebase=
 		;;
-	--continue|--skip|--abort|--edit-todo)
+	--continue|--skip|--abort|--quit|--edit-todo)
 		test $total_argc -eq 2 || usage
 		action=${1##--}
 		;;
@@ -318,7 +324,7 @@ do
 	--ignore-whitespace)
 		git_am_opt="$git_am_opt $1"
 		;;
-	--committer-date-is-author-date|--ignore-date)
+	--committer-date-is-author-date|--ignore-date|--signoff|--no-signoff)
 		git_am_opt="$git_am_opt $1"
 		force_rebase=t
 		;;
@@ -343,6 +349,9 @@ do
 	--)
 		shift
 		break
+		;;
+	*)
+		usage
 		;;
 	esac
 	shift
@@ -397,6 +406,9 @@ abort)
 	finish_rebase
 	exit
 	;;
+quit)
+	exec rm -rf "$state_dir"
+	;;
 edit-todo)
 	run_specific_rebase
 	;;
@@ -437,6 +449,11 @@ else
 	state_dir="$apply_dir"
 fi
 
+if test -t 2 && test -z "$GIT_QUIET"
+then
+	git_format_patch_opt="$git_format_patch_opt --progress"
+fi
+
 if test -z "$rebase_root"
 then
 	case "$#" in
@@ -446,7 +463,7 @@ then
 		then
 			. git-parse-remote
 			error_on_missing_default_upstream "rebase" "rebase" \
-				"against" "git rebase <branch>"
+				"against" "git rebase $(gettext '<branch>')"
 		fi
 
 		test "$fork_point" = auto && fork_point=t
@@ -460,7 +477,7 @@ then
 		;;
 	esac
 	upstream=$(peel_committish "${upstream_name}") ||
-	die "$(eval_gettext "invalid upstream \$upstream_name")"
+	die "$(eval_gettext "invalid upstream '\$upstream_name'")"
 	upstream_arg="$upstream_name"
 else
 	if test -z "$onto"
@@ -501,7 +518,7 @@ case "$onto_name" in
 esac
 
 # If the branch to rebase is given, that is the branch we will rebase
-# $branch_name -- branch being rebased, or HEAD (already detached)
+# $branch_name -- branch/commit being rebased, or HEAD (already detached)
 # $orig_head -- commit object name of tip of the branch before rebasing
 # $head_name -- refs/heads/<that-branch> or "detached HEAD"
 switch_to=
@@ -511,15 +528,18 @@ case "$#" in
 	branch_name="$1"
 	switch_to="$1"
 
-	if git show-ref --verify --quiet -- "refs/heads/$1" &&
-	   orig_head=$(git rev-parse -q --verify "refs/heads/$1")
+	# Is it a local branch?
+	if git show-ref --verify --quiet -- "refs/heads/$branch_name" &&
+	   orig_head=$(git rev-parse -q --verify "refs/heads/$branch_name")
 	then
-		head_name="refs/heads/$1"
-	elif orig_head=$(git rev-parse -q --verify "$1")
+		head_name="refs/heads/$branch_name"
+	# If not is it a valid ref (branch or commit)?
+	elif orig_head=$(git rev-parse -q --verify "$branch_name")
 	then
 		head_name="detached HEAD"
+
 	else
-		die "$(eval_gettext "fatal: no such branch: \$branch_name")"
+		die "$(eval_gettext "fatal: no such branch/commit '\$branch_name'")"
 	fi
 	;;
 0)
@@ -530,7 +550,7 @@ case "$#" in
 		branch_name=$(expr "z$branch_name" : 'zrefs/heads/\(.*\)')
 	else
 		head_name="detached HEAD"
-		branch_name=HEAD ;# detached
+		branch_name=HEAD
 	fi
 	orig_head=$(git rev-parse --verify HEAD) || exit
 	;;
@@ -581,11 +601,23 @@ then
 		test -z "$switch_to" ||
 		GIT_REFLOG_ACTION="$GIT_REFLOG_ACTION: checkout $switch_to" \
 			git checkout -q "$switch_to" --
-		say "$(eval_gettext "Current branch \$branch_name is up to date.")"
+		if test "$branch_name" = "HEAD" &&
+			 ! git symbolic-ref -q HEAD
+		then
+			say "$(eval_gettext "HEAD is up to date.")"
+		else
+			say "$(eval_gettext "Current branch \$branch_name is up to date.")"
+		fi
 		finish_rebase
 		exit 0
 	else
-		say "$(eval_gettext "Current branch \$branch_name is up to date, rebase forced.")"
+		if test "$branch_name" = "HEAD" &&
+			 ! git symbolic-ref -q HEAD
+		then
+			say "$(eval_gettext "HEAD is up to date, rebase forced.")"
+		else
+			say "$(eval_gettext "Current branch \$branch_name is up to date, rebase forced.")"
+		fi
 	fi
 fi
 

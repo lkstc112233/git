@@ -495,7 +495,7 @@ test_expect_success 'should not clean submodules' '
 	test_path_is_missing to_clean
 '
 
-test_expect_success POSIXPERM 'should avoid cleaning possible submodules' '
+test_expect_success POSIXPERM,SANITY 'should avoid cleaning possible submodules' '
 	rm -fr to_clean possible_sub1 &&
 	mkdir to_clean possible_sub1 &&
 	test_when_finished "rm -rf possible_sub*" &&
@@ -651,6 +651,22 @@ test_expect_success 'git clean -d respects pathspecs (pathspec is prefix of dir)
 	git clean -df foo &&
 	test_path_is_missing foo &&
 	test_path_is_dir foobar
+'
+
+test_expect_success 'git clean -d skips untracked dirs containing ignored files' '
+	echo /foo/bar >.gitignore &&
+	echo ignoreme >>.gitignore &&
+	rm -rf foo &&
+	mkdir -p foo/a/aa/aaa foo/b/bb/bbb &&
+	touch foo/bar foo/baz foo/a/aa/ignoreme foo/b/ignoreme foo/b/bb/1 foo/b/bb/2 &&
+	git clean -df &&
+	test_path_is_dir foo &&
+	test_path_is_file foo/bar &&
+	test_path_is_missing foo/baz &&
+	test_path_is_file foo/a/aa/ignoreme &&
+	test_path_is_missing foo/a/aa/aaa &&
+	test_path_is_file foo/b/ignoreme &&
+	test_path_is_missing foo/b/bb
 '
 
 test_done

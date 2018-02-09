@@ -46,7 +46,8 @@ start_git_daemon() {
 
 	say >&3 "Starting git daemon ..."
 	mkfifo git_daemon_output
-	git daemon --listen=127.0.0.1 --port="$LIB_GIT_DAEMON_PORT" \
+	${LIB_GIT_DAEMON_COMMAND:-git daemon} \
+		--listen=127.0.0.1 --port="$LIB_GIT_DAEMON_PORT" \
 		--reuseaddr --verbose \
 		--base-path="$GIT_DAEMON_DOCUMENT_ROOT_PATH" \
 		"$@" "$GIT_DAEMON_DOCUMENT_ROOT_PATH" \
@@ -82,8 +83,7 @@ stop_git_daemon() {
 	kill "$GIT_DAEMON_PID"
 	wait "$GIT_DAEMON_PID" >&3 2>&4
 	ret=$?
-	# expect exit with status 143 = 128+15 for signal TERM=15
-	if test $ret -ne 143
+	if test_match_signal 15 $?
 	then
 		error "git daemon exited with status: $ret"
 	fi

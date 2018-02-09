@@ -4,7 +4,7 @@
 #include "parse-options.h"
 #include "grep.h"
 #include "notes.h"
-#include "commit.h"
+#include "pretty.h"
 #include "diff.h"
 
 /* Remember to update object flag allocation in object.h */
@@ -71,11 +71,19 @@ struct rev_info {
 	const char *def;
 	struct pathspec prune_data;
 
+	/*
+	 * Whether the arguments parsed by setup_revisions() included any
+	 * "input" revisions that might still have yielded an empty pending
+	 * list (e.g., patterns like "--all" or "--glob").
+	 */
+	int rev_input_given;
+
 	/* topo-sort */
 	enum rev_sort_order sort_order;
 
-	unsigned int	early_output:1,
-			ignore_missing:1,
+	unsigned int early_output;
+
+	unsigned int	ignore_missing:1,
 			ignore_missing_links:1;
 
 	/* Traversal flags */
@@ -88,6 +96,7 @@ struct rev_info {
 			topo_order:1,
 			simplify_merges:1,
 			simplify_by_decoration:1,
+			single_worktree:1,
 			tag_objects:1,
 			tree_objects:1,
 			blob_objects:1,
@@ -112,7 +121,8 @@ struct rev_info {
 			bisect:1,
 			ancestry_path:1,
 			first_parent_only:1,
-			line_level_traverse:1;
+			line_level_traverse:1,
+			tree_blobs_in_commit_order:1;
 
 	/* Diff flags */
 	unsigned int	diff:1,
@@ -141,13 +151,14 @@ struct rev_info {
 			date_mode_explicit:1,
 			preserve_subject:1;
 	unsigned int	disable_stdin:1;
-	unsigned int	leak_pending:1;
 	/* --show-linear-break */
 	unsigned int	track_linear:1,
 			track_first_time:1,
 			linear:1;
 
 	struct date_mode date_mode;
+	int		expand_tabs_in_log; /* unset if negative */
+	int		expand_tabs_in_log_default;
 
 	unsigned int	abbrev;
 	enum cmit_fmt	commit_format;
@@ -179,8 +190,8 @@ struct rev_info {
 	/* special limits */
 	int skip_count;
 	int max_count;
-	unsigned long max_age;
-	unsigned long min_age;
+	timestamp_t max_age;
+	timestamp_t min_age;
 	int min_parents;
 	int max_parents;
 	int (*include_check)(struct commit *, void *);
@@ -257,15 +268,13 @@ extern void put_revision_mark(const struct rev_info *revs,
 extern void mark_parents_uninteresting(struct commit *commit);
 extern void mark_tree_uninteresting(struct tree *tree);
 
-char *path_name(struct strbuf *path, const char *name);
-
 extern void show_object_with_name(FILE *, struct object *, const char *);
 
 extern void add_pending_object(struct rev_info *revs,
 			       struct object *obj, const char *name);
-extern void add_pending_sha1(struct rev_info *revs,
-			     const char *name, const unsigned char *sha1,
-			     unsigned int flags);
+extern void add_pending_oid(struct rev_info *revs,
+			    const char *name, const struct object_id *oid,
+			    unsigned int flags);
 
 extern void add_head_to_pending(struct rev_info *);
 extern void add_reflogs_to_pending(struct rev_info *, unsigned int flags);

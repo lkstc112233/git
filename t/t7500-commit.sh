@@ -130,8 +130,8 @@ EOF
 test_expect_success 'commit message from template with whitespace issue' '
 	echo "content galore" >>foo &&
 	git add foo &&
-	GIT_EDITOR="$TEST_DIRECTORY"/t7500/add-whitespaced-content git commit \
-		--template "$TEMPLATE" &&
+	GIT_EDITOR=\""$TEST_DIRECTORY"\"/t7500/add-whitespaced-content \
+	git commit --template "$TEMPLATE" &&
 	commit_msg_is "commit message"
 '
 
@@ -272,6 +272,14 @@ test_expect_success 'commit --fixup provides correct one-line commit message' '
 	commit_msg_is "fixup! target message subject line"
 '
 
+test_expect_success 'commit --fixup -m"something" -m"extra"' '
+	commit_for_rebase_autosquash_setup &&
+	git commit --fixup HEAD~1 -m"something" -m"extra" &&
+	commit_msg_is "fixup! target message subject linesomething
+
+extra"
+'
+
 test_expect_success 'commit --squash works with -F' '
 	commit_for_rebase_autosquash_setup &&
 	echo "log message from file" >msgfile &&
@@ -325,8 +333,30 @@ test_expect_success 'invalid message options when using --fixup' '
 	test_must_fail git commit --fixup HEAD~1 --squash HEAD~2 &&
 	test_must_fail git commit --fixup HEAD~1 -C HEAD~2 &&
 	test_must_fail git commit --fixup HEAD~1 -c HEAD~2 &&
-	test_must_fail git commit --fixup HEAD~1 -m "cmdline message" &&
 	test_must_fail git commit --fixup HEAD~1 -F log
+'
+
+cat >expected-template <<EOF
+
+# Please enter the commit message for your changes. Lines starting
+# with '#' will be ignored, and an empty message aborts the commit.
+#
+# Author:    A U Thor <author@example.com>
+#
+# On branch commit-template-check
+# Changes to be committed:
+#	new file:   commit-template-check
+#
+# Untracked files not listed
+EOF
+
+test_expect_success 'new line found before status message in commit template' '
+	git checkout -b commit-template-check &&
+	git reset --hard HEAD &&
+	touch commit-template-check &&
+	git add commit-template-check &&
+	GIT_EDITOR="cat >editor-input" git commit --untracked-files=no --allow-empty-message &&
+	test_i18ncmp expected-template editor-input
 '
 
 test_done

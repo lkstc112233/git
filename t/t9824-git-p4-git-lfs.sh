@@ -13,6 +13,10 @@ test_file_in_lfs () {
 	FILE="$1" &&
 	SIZE="$2" &&
 	EXPECTED_CONTENT="$3" &&
+	sed -n '1,1 p' "$FILE" | grep "^version " &&
+	sed -n '2,2 p' "$FILE" | grep "^oid " &&
+	sed -n '3,3 p' "$FILE" | grep "^size " &&
+	test_line_count = 3 "$FILE" &&
 	cat "$FILE" | grep "size $SIZE" &&
 	HASH=$(cat "$FILE" | grep "oid sha256:" | sed -e "s/oid sha256://g") &&
 	LFS_FILE=".git/lfs/objects/$(echo "$HASH" | cut -c1-2)/$(echo "$HASH" | cut -c3-4)/$HASH" &&
@@ -38,6 +42,8 @@ test_expect_success 'Create repo with binary files' '
 	(
 		cd "$cli" &&
 
+		>file0.dat &&
+		p4 add file0.dat &&
 		echo "content 1 txt 23 bytes" >file1.txt &&
 		p4 add file1.txt &&
 		echo "content 2-3 bin 25 bytes" >file2.dat &&
@@ -77,9 +83,9 @@ test_expect_success 'Store files in LFS based on size (>24 bytes)' '
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		/file2.dat filter=lfs -text
-		/file4.bin filter=lfs -text
-		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs -text
+		/file2.dat filter=lfs diff=lfs merge=lfs -text
+		/file4.bin filter=lfs diff=lfs merge=lfs -text
+		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -105,7 +111,7 @@ test_expect_success 'Store files in LFS based on size (>25 bytes)' '
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		/file4.bin filter=lfs -text
+		/file4.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -131,7 +137,7 @@ test_expect_success 'Store files in LFS based on extension (dat)' '
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		*.dat filter=lfs -text
+		*.dat filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -159,8 +165,8 @@ test_expect_success 'Store files in LFS based on size (>25 bytes) and extension 
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		*.dat filter=lfs -text
-		/file4.bin filter=lfs -text
+		*.dat filter=lfs diff=lfs merge=lfs -text
+		/file4.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -195,8 +201,8 @@ test_expect_success 'Remove file from repo and store files in LFS based on size 
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		/file2.dat filter=lfs -text
-		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs -text
+		/file2.dat filter=lfs diff=lfs merge=lfs -text
+		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -233,8 +239,8 @@ test_expect_success 'Add .gitattributes and store files in LFS based on size (>2
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		/file2.dat filter=lfs -text
-		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs -text
+		/file2.dat filter=lfs diff=lfs merge=lfs -text
+		/path[[:space:]]with[[:space:]]spaces/file3.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes
@@ -265,7 +271,7 @@ test_expect_success 'Add big files to repo and store files in LFS based on compr
 		# We only import HEAD here ("@all" is missing!)
 		git p4 clone --destination="$git" //depot &&
 
-		test_file_in_lfs file6.bin 13 "content 6 bin 39 bytes XXXXXYYYYYZZZZZ"
+		test_file_in_lfs file6.bin 39 "content 6 bin 39 bytes XXXXXYYYYYZZZZZ" &&
 		test_file_count_in_dir ".git/lfs/objects" 1 &&
 
 		cat >expect <<-\EOF &&
@@ -274,7 +280,7 @@ test_expect_success 'Add big files to repo and store files in LFS based on compr
 		#
 		# Git LFS (see https://git-lfs.github.com/)
 		#
-		/file6.bin filter=lfs -text
+		/file6.bin filter=lfs diff=lfs merge=lfs -text
 		EOF
 		test_path_is_file .gitattributes &&
 		test_cmp expect .gitattributes

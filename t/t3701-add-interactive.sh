@@ -2,6 +2,7 @@
 
 test_description='add -i basic tests'
 . ./test-lib.sh
+. "$TEST_DIRECTORY"/lib-terminal.sh
 
 if ! test_have_prereq PERL
 then
@@ -378,6 +379,166 @@ test_expect_success 'patch mode ignores unmerged entries' '
 	EOF
 	git diff --cached >diff &&
 	test_cmp expected diff
+'
+
+test_expect_success TTY 'diffs can be colorized' '
+	git reset --hard &&
+
+	echo content >test &&
+	printf y | test_terminal git add -p >output 2>&1 &&
+
+	# We do not want to depend on the exact coloring scheme
+	# git uses for diffs, so just check that we saw some kind of color.
+	grep "$(printf "\\033")" output
+'
+
+test_expect_success 'patch-mode via -i prompts for files' '
+	git reset --hard &&
+
+	echo one >file &&
+	echo two >test &&
+	git add -i <<-\EOF &&
+	patch
+	test
+
+	y
+	quit
+	EOF
+
+	echo test >expect &&
+	git diff --cached --name-only >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'add -p handles globs' '
+	git reset --hard &&
+
+	mkdir -p subdir &&
+	echo base >one.c &&
+	echo base >subdir/two.c &&
+	git add "*.c" &&
+	git commit -m base &&
+
+	echo change >one.c &&
+	echo change >subdir/two.c &&
+	git add -p "*.c" <<-\EOF &&
+	y
+	y
+	EOF
+
+	cat >expect <<-\EOF &&
+	one.c
+	subdir/two.c
+	EOF
+	git diff --cached --name-only >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'add -p handles relative paths' '
+	git reset --hard &&
+
+	echo base >relpath.c &&
+	git add "*.c" &&
+	git commit -m relpath &&
+
+	echo change >relpath.c &&
+	mkdir -p subdir &&
+	git -C subdir add -p .. 2>error <<-\EOF &&
+	y
+	EOF
+
+	test_must_be_empty error &&
+
+	cat >expect <<-\EOF &&
+	relpath.c
+	EOF
+	git diff --cached --name-only >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'add -p does not expand argument lists' '
+	git reset --hard &&
+
+	echo content >not-changed &&
+	git add not-changed &&
+	git commit -m "add not-changed file" &&
+
+	echo change >file &&
+	GIT_TRACE=$(pwd)/trace.out git add -p . <<-\EOF &&
+	y
+	EOF
+
+	# we know that "file" must be mentioned since we actually
+	# update it, but we want to be sure that our "." pathspec
+	# was not expanded into the argument list of any command.
+	# So look only for "not-changed".
+	! grep not-changed trace.out
+'
+
+test_expect_success 'hunk-editing handles custom comment char' '
+	git reset --hard &&
+	echo change >>file &&
+	test_config core.commentChar "\$" &&
+	echo e | GIT_EDITOR=true git add -p &&
+	git diff --exit-code
+'
+
+test_expect_success 'add -p works even with color.ui=always' '
+	git reset --hard &&
+	echo change >>file &&
+	test_config color.ui always &&
+	echo y | git add -p &&
+	echo file >expect &&
+	git diff --cached --name-only >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success 'setup different kinds of dirty submodules' '
+	test_create_repo for-submodules &&
+	(
+		cd for-submodules &&
+		test_commit initial &&
+		test_create_repo dirty-head &&
+		(
+			cd dirty-head &&
+			test_commit initial
+		) &&
+		cp -R dirty-head dirty-otherwise &&
+		cp -R dirty-head dirty-both-ways &&
+		git add dirty-head &&
+		git add dirty-otherwise dirty-both-ways &&
+		git commit -m initial &&
+
+		cd dirty-head &&
+		test_commit updated &&
+		cd ../dirty-both-ways &&
+		test_commit updated &&
+		echo dirty >>initial &&
+		: >untracked &&
+		cd ../dirty-otherwise &&
+		echo dirty >>initial &&
+		: >untracked
+	) &&
+	git -C for-submodules diff-files --name-only >actual &&
+	cat >expected <<-\EOF &&
+	dirty-both-ways
+	dirty-head
+	dirty-otherwise
+	EOF
+	test_cmp expected actual &&
+	git -C for-submodules diff-files --name-only --ignore-submodules=dirty >actual &&
+	cat >expected <<-\EOF &&
+	dirty-both-ways
+	dirty-head
+	EOF
+	test_cmp expected actual
+'
+
+test_expect_success 'status ignores dirty submodules (except HEAD)' '
+	git -C for-submodules add -i </dev/null >output &&
+	grep dirty-head output &&
+	grep dirty-both-ways output &&
+	! grep dirty-otherwise output
 '
 
 test_done

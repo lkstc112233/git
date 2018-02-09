@@ -6,6 +6,7 @@
 #define PRECOMPOSE_UNICODE_C
 
 #include "cache.h"
+#include "config.h"
 #include "utf8.h"
 #include "precompose_utf8.h"
 
@@ -147,7 +148,7 @@ struct dirent_prec_psx *precompose_utf8_readdir(PREC_DIR *prec_dir)
 				if (errno || inleft) {
 					/*
 					 * iconv() failed and errno could be E2BIG, EILSEQ, EINVAL, EBADF
-					 * MacOS X avoids illegal byte sequemces.
+					 * MacOS X avoids illegal byte sequences.
 					 * If they occur on a mounted drive (e.g. NFS) it is not worth to
 					 * die() for that, but rather let the user see the original name
 					*/
